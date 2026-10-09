@@ -1,0 +1,1102 @@
+//@version=6
+// ============================================================================
+//  Euro Pro – M1 Trendline Scalper v2 (XAUUSD)
+//  Chỉ báo hiển thị tín hiệu Buy/Sell + cảnh báo. KHÔNG tự động đặt lệnh.
+//  Mọi logic chỉ cập nhật khi nến 1 phút ĐÃ ĐÓNG → realtime = lịch sử sau khi tải lại.
+//  v2: bộ cấu hình (preset), xu hướng BOS, trendline nhanh, xác nhận mở rộng
+//      (nhấn chìm / pin bar), đường EMA động, nhiều tín hiệu song song,
+//      thống kê theo phiên: bảng chỉ tính trong khung giờ 08:30–21:00 mỗi ngày (chỉnh được),
+//      sang ngày mới tự làm lại từ đầu.
+//  + Nhóm 9: hàm thông báo điểm vào lệnh (f_sigMsg / f_notify) với 3 kiểu nội dung.
+// ============================================================================
+indicator("KIM CHỈ VÀNG EP 7h-21h hằng ngày DCA", shorttitle = "KIM CHỈ VÀNG EP 7h-21h hằng ngày DCA", overlay = true,
+     max_labels_count = 500, max_lines_count = 500, max_bars_back = 1000)
+
+// ============================================================================
+// 1. INPUTS
+// ============================================================================
+G0 = "0. Bộ cấu hình"
+presetIn = input.string("Cân bằng", "Bộ cấu hình", options = ["Chặt (v1)", "Cân bằng", "Nhiều tín hiệu", "Tùy chỉnh"], group = G0,
+     tooltip = "Chặt (v1): giống bản 1. Cân bằng: xu hướng BOS + trendline chính & nhanh + xác nhận mở rộng, tối đa 2 tín hiệu song song. Nhiều tín hiệu: thêm EMA20 làm đường hỗ trợ/kháng cự động, vùng rộng hơn, tối đa 3 tín hiệu. Tùy chỉnh: dùng các thông số ở nhóm 1–3 bên dưới.", display = display.none)
+
+G1 = "1. Xu hướng M1 (chỉ dùng khi Tùy chỉnh)"
+trendModeIn = input.string("BOS", "Cách xác định xu hướng", options = ["HH/HL chặt", "BOS"], group = G1,
+     tooltip = "HH/HL chặt: 2 đỉnh và 2 đáy gần nhất cùng cao dần/thấp dần. BOS: tăng khi nến đóng trên đỉnh xác nhận gần nhất, giảm khi đóng dưới đáy xác nhận gần nhất; giữ trạng thái đến khi phá cấu trúc ngược lại.", display = display.none)
+minStepAtr = input.float(0.10, "HH/HL: chênh lệch tối thiểu (x ATR)", minval = 0.0, step = 0.05, group = G1, display = display.none)
+useEmaFilt = input.bool(false, "Lọc xu hướng thêm bằng EMA50", group = G1, display = display.none)
+pvLeft  = input.int(5, "Pivot chính – nến trái", minval = 1, group = G1, display = display.none)
+pvRight = input.int(3, "Pivot chính – nến phải (xác nhận)", minval = 1, group = G1, display = display.none)
+
+G2 = "2. Trendline & vùng (chỉ dùng khi Tùy chỉnh)"
+useFastIn = input.bool(true, "Dùng thêm trendline nhanh", group = G2, tooltip = "Trendline nối pivot nhỏ hơn – bám sát các nhịp dốc mà trendline chính bỏ lỡ.", display = display.none)
+fastL     = input.int(3, "Pivot nhanh – nến trái", minval = 1, group = G2, display = display.none)
+fastR     = input.int(2, "Pivot nhanh – nến phải (xác nhận)", minval = 1, group = G2, display = display.none)
+useEmaIn  = input.bool(false, "Dùng EMA làm đường hỗ trợ/kháng cự động", group = G2, display = display.none)
+emaLineLen = input.int(20, "Độ dài EMA động", minval = 2, group = G2, display = display.none)
+minGap   = input.int(8, "Khoảng cách tối thiểu 2 neo – chính (nến)", minval = 2, group = G2, display = display.none)
+minGapF  = input.int(5, "Khoảng cách tối thiểu 2 neo – nhanh (nến)", minval = 2, group = G2, display = display.none)
+maxSpan  = input.int(120, "Khoảng cách tối đa 2 neo (nến)", minval = 10, maxval = 400, group = G2, display = display.none)
+maxAge   = input.int(180, "Tuổi tối đa trendline (nến từ neo 2)", minval = 10, group = G2, display = display.none)
+penAtrIn   = input.float(0.25, "Dung sai xuyên đường (x ATR)", minval = 0.0, step = 0.05, group = G2, display = display.none)
+zoneAtrIn  = input.float(0.6, "Vùng tiếp cận (x ATR)", minval = 0.0, step = 0.05, group = G2, display = display.none)
+entryAtrIn = input.float(1.5, "Entry cách đường tối đa (x ATR)", minval = 0.0, step = 0.05, group = G2, display = display.none)
+leaveAtrIn = input.float(0.25, "Khoảng rời vùng để có nhịp hồi mới (x ATR)", minval = 0.0, step = 0.05, group = G2, display = display.none)
+
+G3 = "3. Xác nhận & số tín hiệu (chỉ dùng khi Tùy chỉnh)"
+confModeIn  = input.string("Mở rộng", "Kiểu nến xác nhận", options = ["Chặt", "Mở rộng"], group = G3,
+     tooltip = "Chặt: nến cùng chiều, thân ≥ tỷ lệ tối thiểu, đóng vượt đỉnh (Buy) / đáy (Sell) nến trước. Mở rộng: thêm nến nhấn chìm hoặc pin bar (râu từ chối ≥ 50% biên độ, đóng ở 40% phía thuận).", display = display.none)
+minBody    = input.float(0.5, "Thân nến tối thiểu (thân / biên độ)", minval = 0.1, maxval = 1.0, step = 0.05, group = G3, display = display.none)
+maxWaitIn  = input.int(5, "Số nến tối đa chờ xác nhận", minval = 0, maxval = 20, group = G3, display = display.none)
+maxActiveIn = input.int(2, "Số tín hiệu theo dõi song song tối đa", minval = 1, maxval = 5, group = G3, display = display.none)
+
+G4 = "4. TP / SL"
+priceUnit = input.float(1.0, "1 'giá' = bao nhiêu đơn vị báo giá", minval = 0.0001, group = G4, tooltip = "XAUUSD: 1 giá = 1 USD. Không phải pip/tick.", display = display.none)
+tpDist    = input.float(8.0, "TP (giá)", minval = 0.01, step = 0.5, group = G4, display = display.none)
+slDist    = input.float(20.0, "SL (giá)", minval = 0.01, step = 0.5, group = G4, display = display.none)
+useDca    = input.bool(true, "Gồng thêm 1 lệnh khi giá đi ngược", group = G4, display = display.none)
+dcaDist   = input.float(10.0, "Khoảng cách gồng (giá)", minval = 0.01, step = 0.5, group = G4,
+     tooltip = "Khi giá đi ngược đúng khoảng này so với ĐIỂM VÀO của lệnh gốc, mở thêm 1 lệnh cùng chiều cùng khối lượng. Sau đó TP của cả hai lệnh dời về điểm vào của lệnh gốc, SL của cả hai giữ nguyên SL gốc. Mỗi chu kỳ tối đa 2 lệnh, không có lệnh thứ ba.", display = display.none)
+
+G10 = "★ Giao diện cho người mới"
+uiSimple  = input.bool(true, "Chế độ đơn giản – chỉ hiện VÀO LỆNH / CHỐT LỜI / CẮT LỖ", group = G10,
+     tooltip = "Bật: ẩn hết trendline, vùng tiếp cận, điểm neo và các dòng kỹ thuật. Trên chart chỉ còn mũi tên MUA/BÁN, 3 đường giá và 2 vùng màu. Tắt: hiện đầy đủ như bản gốc.", display = display.none)
+uiMobile  = input.bool(true, "Tối ưu cho điện thoại (bảng 1 cột, gọn)", group = G10,
+     tooltip = "Bật: bảng rút thành 1 cột, mỗi dòng là một câu ngắn nên không bị tràn ra ngoài màn hình điện thoại; nhãn giá trên chart cũng được kéo vào trong để không bị cắt. Tắt: bảng 2 cột như trên máy tính.", display = display.none)
+uiTxtSize = input.string("Vừa", "Cỡ chữ bảng", options = ["Nhỏ", "Vừa", "To"], group = G10, display = display.none)
+uiNote    = input.bool(false, "Hiện dòng nhắc cuối bảng", group = G10, display = display.none)
+uiLateTol = input.float(3.0, "Đuổi giá tối đa (giá) – chỉ áp khi giá đã chạy THUẬN chiều", minval = 0.0, step = 0.5, group = G10,
+     tooltip = "Giá đi NGƯỢC chiều lệnh (BUY tụt xuống, SELL lên cao) thì vào lúc này còn được giá TỐT HƠN tín hiệu gốc, nên vẫn báo CÒN VÀO ĐƯỢC cho tới khi chạm cắt lỗ. Chỉ khi giá đã chạy THUẬN chiều quá mức đặt ở đây, bảng mới báo ĐÃ CHẠY XA để không đuổi giá.", display = display.none)
+uiZoneBox = input.bool(true, "Tô vùng lãi (xanh) và vùng lỗ (đỏ)", group = G10,
+     tooltip = "Vùng xanh = khoảng giá đi tới chốt lời. Vùng đỏ = khoảng giá đi tới cắt lỗ. Nhìn màu là biết lệnh đang đi về phía nào.", display = display.none)
+uiPanel   = input.bool(true, "Bảng hướng dẫn nhanh (góc chart)", group = G10, display = display.none)
+
+G11 = "★ Watermark"
+wmOn    = input.bool(true, "Hiện watermark giữa chart", group = G11, display = display.none)
+wmText = input.string("\nGIỜ ĐÂY HỆ THỐNG TÍN HIỆU ĐÃ HOẠT ĐỘNG TRÊN WEBSITE kimchivang.com\nVui lòng truy cập và liên hệ Zalo Admin 0886.558.169 để được cấp mã vào.", "Nội dung", group = G11, display = display.none)
+wmSizeIn = input.string("Lớn", "Cỡ chữ", options = ["Vừa", "Lớn", "Rất lớn"], group = G11, display = display.none)
+wmTrans = input.int(0, "Độ mờ (0 = đậm đặc, 100 = trong suốt)", minval = 0, maxval = 100, group = G11, display = display.none)
+wmColor = input.color(color.rgb(0, 0, 0), "Màu chữ", group = G11, display = display.none)
+
+G5 = "5. Hiển thị"
+showSigLbl  = input.bool(true, "Nhãn Buy/Sell", group = G5, display = display.none)
+showLevels  = input.bool(true, "Đường Entry / TP / SL", group = G5, display = display.none)
+showZoneIn  = input.bool(true, "Vùng tiếp cận trendline chính", group = G5, display = display.none)
+showTLIn    = input.bool(true, "Trendline đang dùng + điểm neo", group = G5, display = display.none)
+showOldTLIn = input.bool(true, "Giữ trendline đã mất hiệu lực", group = G5, display = display.none)
+maxOldTL    = input.int(6, "Số trendline cũ tối đa", minval = 1, maxval = 50, group = G5, display = display.none)
+showHistory = input.bool(true, "Giữ lịch sử tín hiệu", group = G5, display = display.none)
+maxHist     = input.int(30, "Số tín hiệu lịch sử tối đa", minval = 1, maxval = 80, group = G5, display = display.none)
+showTable   = input.bool(true, "Bảng trạng thái", group = G5, display = display.none)
+tablePosIn  = input.string("Dưới phải", "Vị trí bảng", options = ["Trên phải", "Dưới phải", "Trên trái", "Dưới trái"], group = G5,
+     tooltip = "Trên điện thoại nên để Dưới phải hoặc Dưới trái: góc trên là chỗ TradingView hiện tên mã và giá, bảng đặt ở đó sẽ che mất. Bảng luôn mọc ngược vào trong nên không bị tràn ra ngoài màn hình.", display = display.none)
+
+G6 = "6. Thống kê & cảnh báo"
+statMode = input.string("Phiên trong ngày", "Phạm vi thống kê", options = ["Phiên trong ngày", "Tháng này (theo khung giờ)", "Cả ngày (00:00)", "24 giờ gần nhất", "Toàn bộ chart"], group = G6,
+     tooltip = "Mọi phạm vi đều tính theo GIỜ VÀO LỆNH: lệnh vào ngoài khung giờ sẽ không được ghi nhận dù đóng trong khung giờ. Tháng này: cộng dồn từ ngày 1 của tháng tới hiện tại, mỗi ngày chỉ tính khung giờ đặt ở mục Tháng bên dưới (mặc định 07:00–21:00). Phiên trong ngày (mặc định): chỉ tính các lệnh được VÀO trong khung giờ đặt bên dưới (mặc định 07:00–21:00), sang ngày mới tự làm lại từ đầu. Cả ngày: tính từ 00:00. 24 giờ gần nhất: cửa sổ trượt. Toàn bộ chart: cộng dồn từ nến đầu tiên.", display = display.none)
+sessSH = input.int(7,  "Phiên bắt đầu – giờ", minval = 0, maxval = 23, group = G6, display = display.none)
+sessSM = input.int(0,  "Phiên bắt đầu – phút", minval = 0, maxval = 59, group = G6, display = display.none)
+sessEH = input.int(21, "Phiên kết thúc – giờ", minval = 0, maxval = 23, group = G6, display = display.none)
+sessEM = input.int(0,  "Phiên kết thúc – phút", minval = 0, maxval = 59, group = G6,
+     tooltip = "Giờ theo múi giờ chọn bên dưới. Nếu giờ kết thúc nhỏ hơn giờ bắt đầu thì phiên được hiểu là vắt qua nửa đêm.", display = display.none)
+monSH = input.int(7,  "Tháng – giờ bắt đầu mỗi ngày", minval = 0, maxval = 23, group = G6, display = display.none)
+monSM = input.int(0,  "Tháng – phút bắt đầu", minval = 0, maxval = 59, group = G6, display = display.none)
+monEH = input.int(21, "Tháng – giờ kết thúc mỗi ngày", minval = 0, maxval = 23, group = G6, display = display.none)
+monEM = input.int(0,  "Tháng – phút kết thúc", minval = 0, maxval = 59, group = G6,
+     tooltip = "Chỉ áp dụng cho phạm vi 'Tháng này'. Thống kê chạy từ 00:00 ngày 1 của tháng tới nến hiện tại, nhưng chỉ tính các lệnh được VÀO trong khung giờ này.", display = display.none)
+tzIn       = input.string("Asia/Ho_Chi_Minh", "Múi giờ trong nội dung cảnh báo", group = G6, display = display.none)
+alertExits = input.bool(false, "Gửi thêm cảnh báo khi chạm TP / SL / Không xác định", group = G6, display = display.none)
+
+G9 = "9. Thông báo điểm vào lệnh"
+notifyOn    = input.bool(true, "Bật thông báo khi có điểm vào lệnh", group = G9,
+     tooltip = "Thông báo được gửi đúng 1 lần, ngay khi nến 1 phút xác nhận đóng. Vào TradingView bấm Alert → chọn chỉ báo này → điều kiện 'Any alert() function call'.", display = display.none)
+notifyFmt   = input.string("Đầy đủ", "Kiểu nội dung", options = ["Đầy đủ", "Ngắn gọn", "JSON (webhook)"], group = G9,
+     tooltip = "Đầy đủ: câu tiếng Việt có đủ Entry/TP/SL. Ngắn gọn: một dòng tối giản cho SMS/Telegram. JSON: dạng máy đọc được, dùng cho webhook sang bot.", display = display.none)
+notifyTag   = input.string("EURO PRO", "Tên hiển thị đầu thông báo", group = G9, display = display.none)
+notifyInSes = input.bool(false, "Chỉ thông báo trong khung giờ phiên", group = G9,
+     tooltip = "Bật: chỉ gửi thông báo cho tín hiệu nằm trong khung giờ ở nhóm 6 (mặc định 07:00–21:00). Tắt: gửi mọi tín hiệu, kể cả ngoài phiên.", display = display.none)
+notifyExtra = input.bool(true, "Kèm xu hướng và nguồn tín hiệu", group = G9, display = display.none)
+
+G7 = "7. Tham khảo khung lớn (KHÔNG ảnh hưởng tín hiệu)"
+showHtf   = input.bool(false, "Hiện hướng M3 / M15 trong bảng", group = G7, display = display.none)
+htfEmaLen = input.int(50, "EMA khung lớn", minval = 1, group = G7, display = display.none)
+
+// ---------- Giải preset ----------
+isCustom  = presetIn == "Tùy chỉnh"
+isStrict  = presetIn == "Chặt (v1)"
+isMany    = presetIn == "Nhiều tín hiệu"
+trendMode = isCustom ? trendModeIn : isStrict ? "HH/HL chặt" : "BOS"
+useFast   = isCustom ? useFastIn : not isStrict
+useEmaLn  = isCustom ? useEmaIn : isMany
+confMode  = isCustom ? confModeIn : isStrict ? "Chặt" : "Mở rộng"
+maxWait   = isCustom ? maxWaitIn : isStrict ? 3 : isMany ? 6 : 5
+maxActive = isCustom ? maxActiveIn : isStrict ? 1 : isMany ? 3 : 2
+penK      = isCustom ? penAtrIn : 0.25
+zoneK     = isCustom ? zoneAtrIn : isMany ? 1.0 : 0.6
+entryK    = isCustom ? entryAtrIn : 1.5
+leaveK    = isCustom ? leaveAtrIn : isStrict ? 0.5 : 0.25
+emaLnLen  = isCustom ? emaLineLen : 20
+
+// ---------- Giải giao diện ----------
+// Chế độ đơn giản tắt mọi thứ mang tính kỹ thuật, chỉ giữ lại điểm vào lệnh và mức chốt/cắt.
+showZone  = showZoneIn and not uiSimple
+showTL    = showTLIn and not uiSimple
+showOldTL = showOldTLIn and not uiSimple
+sizeBig   = uiTxtSize == "To" ? size.large : uiTxtSize == "Nhỏ" ? size.small : size.normal
+sizeMid   = uiTxtSize == "To" ? size.normal : uiTxtSize == "Nhỏ" ? size.tiny : size.small
+
+// Màu
+cBull  = color.new(#26a69a, 0)
+cBear  = color.new(#ef5350, 0)
+cBullF = color.new(#26a69a, 40)
+cBearF = color.new(#ef5350, 40)
+cDead  = color.new(color.gray, 35)
+cEntry = color.new(#2962ff, 0)
+cTP    = color.new(#00c853, 0)
+cSL    = color.new(#ff1744, 0)
+cTPbg  = color.new(#00c853, 88)
+cSLbg  = color.new(#ff1744, 90)
+
+// ============================================================================
+// 2. SERIES CƠ BẢN
+// ============================================================================
+isM1      = timeframe.period == "1"
+confirmed = barstate.isconfirmed
+atr       = ta.atr(14)
+ema50     = ta.ema(close, 50)
+emaLn     = ta.ema(close, emaLnLen)
+phM = ta.pivothigh(high, pvLeft, pvRight)
+plM = ta.pivotlow(low, pvLeft, pvRight)
+phF = ta.pivothigh(high, fastL, fastR)
+plF = ta.pivotlow(low, fastL, fastR)
+
+penTol   = penK * atr
+zoneTol  = zoneK * atr
+entryMax = entryK * atr
+leaveDst = leaveK * atr
+
+f_htfDir() =>
+    e = ta.ema(close, htfEmaLen)
+    close[1] > e[1] ? 1 : close[1] < e[1] ? -1 : 0
+htf3  = request.security(syminfo.tickerid, "3", f_htfDir(), lookahead = barmerge.lookahead_on)
+htf15 = request.security(syminfo.tickerid, "15", f_htfDir(), lookahead = barmerge.lookahead_on)
+
+// ============================================================================
+// 3. KIỂU DỮ LIỆU
+// ============================================================================
+type TLine
+    int   a1B
+    float a1P
+    int   a2B
+    float a2P
+    float slope
+    int   knownB
+    int   status = 1        // 1 hợp lệ, 2 bị phá vỡ, 3 hết hạn
+    bool  fast = false
+    line  ln
+    array<label> marks
+
+type Setup
+    int    st = 0           // 0 chờ rời vùng, 1 chờ hồi, 2 trong vùng chờ xác nhận
+    int    touchB
+    float  ext
+    string fail = ""
+
+type Sig
+    int    dir
+    int    bar
+    float  entry
+    float  tp
+    float  sl
+    string src
+    string tTxt
+    int    tOpen
+    bool   inWin
+    bool   isAdd
+    bool   added
+    float  addAt
+    line   lnE
+    line   lnT
+    line   lnS
+    label  lbE
+    label  lbT
+    label  lbS
+    box    bxT
+    box    bxS
+
+// ============================================================================
+// 4. HÀM
+// ============================================================================
+f_lineVal(int a1B, float a1P, float slope, int b) =>
+    a1P + slope * (b - a1B)
+
+f_tlVal(TLine t, int b) =>
+    f_lineVal(t.a1B, t.a1P, t.slope, b)
+
+// Hợp lệ: nến giữa 2 neo không xuyên quá dung sai; nến sau neo 2 không đóng cửa xuyên đường.
+f_valid(bool bull, int a1B, float a1P, int a2B, float a2P, float tol) =>
+    slope = (a2P - a1P) / (a2B - a1B)
+    ok = true
+    if a2B - a1B >= 2
+        for b = a1B + 1 to a2B - 1
+            y = f_lineVal(a1B, a1P, slope, b)
+            if bull ? low[bar_index - b] < y - tol : high[bar_index - b] > y + tol
+                ok := false
+                break
+    if ok
+        for b = a2B + 1 to bar_index
+            y = f_lineVal(a1B, a1P, slope, b)
+            if bull ? close[bar_index - b] < y - tol : close[bar_index - b] > y + tol
+                ok := false
+                break
+    ok
+
+// Neo 2 = pivot vừa xác nhận; neo 1 = pivot gần nhất phía trước thỏa khoảng cách, thấp hơn (tăng) / cao hơn (giảm) và đường hợp lệ.
+f_build(bool bull, array<float> P, array<int> BX, int gapMin, bool isFast) =>
+    TLine res = na
+    if P.size() >= 2
+        a2B = BX.get(0)
+        a2P = P.get(0)
+        for i = 1 to P.size() - 1
+            cB = BX.get(i)
+            cP = P.get(i)
+            gap = a2B - cB
+            if gap > maxSpan
+                break
+            if gap >= gapMin and (bull ? cP < a2P : cP > a2P)
+                if f_valid(bull, cB, cP, a2B, a2P, penTol)
+                    res := TLine.new(a1B = cB, a1P = cP, a2B = a2B, a2P = a2P, slope = (a2P - cP) / (a2B - cB),
+                         knownB = bar_index, status = 1, fast = isFast, ln = na, marks = array.new<label>())
+                    break
+    res
+
+f_clearMarks(TLine t) =>
+    if not na(t)
+        while t.marks.size() > 0
+            label.delete(t.marks.pop())
+
+f_retire(TLine t, array<line> store) =>
+    if not na(t)
+        f_clearMarks(t)
+        if not na(t.ln)
+            if showOldTL
+                line.set_extend(t.ln, extend.none)
+                line.set_xy2(t.ln, bar_index, f_tlVal(t, bar_index))
+                line.set_color(t.ln, cDead)
+                line.set_style(t.ln, line.style_dashed)
+                line.set_width(t.ln, 1)
+                store.push(t.ln)
+                if store.size() > maxOldTL
+                    line.delete(store.shift())
+            else
+                line.delete(t.ln)
+
+f_draw(TLine t, bool bull) =>
+    if showTL and not na(t)
+        col = t.fast ? (bull ? cBullF : cBearF) : (bull ? cBull : cBear)
+        t.ln := line.new(t.a1B, t.a1P, t.a2B, t.a2P, extend = extend.right, color = col, width = t.fast ? 1 : 2,
+             style = t.fast ? line.style_dotted : line.style_solid)
+        nm = (t.fast ? "nhanh " : "chính ") + (bull ? "tăng" : "giảm")
+        t.marks.push(label.new(t.a1B, t.a1P, "", style = label.style_circle, color = col, size = size.tiny, tooltip = "Neo 1 trendline " + nm + ": " + str.tostring(t.a1P, format.mintick)))
+        t.marks.push(label.new(t.a2B, t.a2P, "", style = label.style_circle, color = col, size = size.tiny, tooltip = "Neo 2 trendline " + nm + ": " + str.tostring(t.a2P, format.mintick)))
+        t.marks.push(label.new(bar_index, bull ? low : high, t.fast ? "tl✓" : "TL✓", yloc = bull ? yloc.belowbar : yloc.abovebar,
+             style = label.style_none, textcolor = col, size = size.tiny,
+             tooltip = "Trendline " + nm + " chỉ được BIẾT và dùng từ nến này (sau khi neo 2 đủ nến xác nhận)."))
+
+// Cập nhật phá vỡ / hết hạn
+f_status(TLine t, bool bull, array<line> store) =>
+    if not na(t)
+        if t.status == 1 and bar_index > t.knownB
+            v = f_tlVal(t, bar_index)
+            if bull ? close < v - penTol : close > v + penTol
+                t.status := 2
+                f_retire(t, store)
+            else if bar_index - t.a2B > maxAge
+                t.status := 3
+                f_retire(t, store)
+
+f_confBull() =>
+    rng = high - low
+    strict = rng > 0 and close > open and (close - open) >= minBody * rng and close > high[1]
+    engulf = close > open and close[1] < open[1] and close >= open[1] and open <= close[1]
+    pin = rng > 0 and (math.min(open, close) - low) >= 0.5 * rng and close >= low + 0.6 * rng
+    confMode == "Chặt" ? strict : (strict or engulf or pin)
+
+f_confBear() =>
+    rng = high - low
+    strict = rng > 0 and close < open and (open - close) >= minBody * rng and close < low[1]
+    engulf = close < open and close[1] > open[1] and close <= open[1] and open >= close[1]
+    pin = rng > 0 and (high - math.max(open, close)) >= 0.5 * rng and close <= high - 0.6 * rng
+    confMode == "Chặt" ? strict : (strict or engulf or pin)
+
+// Máy trạng thái nhịp hồi cho 1 đường (trendline hoặc EMA). Trả về true nếu đủ điều kiện phát tín hiệu.
+f_setup(Setup s, bool bull, float v, bool isOn, int knownB, bool canSig) =>
+    bool fire = false
+    if not isOn or na(v) or bar_index <= knownB
+        s.st := 0
+    else
+        edge  = bull ? v + zoneTol : v - zoneTol
+        far   = bull ? low > edge + leaveDst : high < edge - leaveDst
+        touch = bull ? low <= edge : high >= edge
+        dep   = bull ? low - v : v - high
+        if s.st == 0 and far
+            s.st := 1
+        else if s.st == 1 and touch
+            s.st := 2
+            s.touchB := bar_index
+            s.ext := dep
+        else if s.st == 2
+            s.ext := math.min(s.ext, dep)
+        if s.st == 2
+            if s.ext < -penTol
+                s.st := 0
+                s.fail := "Nhịp hồi xuyên sâu quá dung sai – bỏ nhịp này"
+            else
+                conf   = bull ? f_confBull() : f_confBear()
+                distOk = bull ? (close > v and close - v <= entryMax) : (close < v and v - close <= entryMax)
+                if conf and distOk and canSig
+                    fire := true
+                    s.fail := ""
+                else
+                    s.fail := not conf ? (bull ? "Chờ nến xác nhận tăng" : "Chờ nến xác nhận giảm") : not distOk ? "Entry quá xa đường" : "Đã đủ số tín hiệu đang theo dõi"
+                    if bar_index - s.touchB >= maxWait
+                        s.st := 0
+                    else if far
+                        s.st := 1
+    fire
+
+// ---------------------------------------------------------------------------
+// THÔNG BÁO ĐIỂM VÀO LỆNH
+// Dựng nội dung thông báo cho 1 tín hiệu. Không đụng tới logic vào lệnh.
+// d: 1 = BUY, -1 = SELL | src: nguồn tín hiệu (TL / TLn / EMA) | tt: thời điểm nến đóng
+// ---------------------------------------------------------------------------
+f_sigMsg(int d, string src, float e, float tpv, float slv, string tt, string trend) =>
+    side  = d == 1 ? "BUY" : "SELL"
+    sym   = syminfo.ticker
+    eS    = str.tostring(e, format.mintick)
+    tS    = str.tostring(tpv, format.mintick)
+    sS    = str.tostring(slv, format.mintick)
+    string out = ""
+    if notifyFmt == "JSON (webhook)"
+        out := str.format('{{"tag":"{0}","symbol":"{1}","side":"{2}","time":"{3}","entry":{4},"tp":{5},"sl":{6},"tf":"M1","source":"{7}","trend":"{8}"}}',
+             notifyTag, sym, side, tt, eS, tS, sS, src, trend)
+    else if notifyFmt == "Ngắn gọn"
+        out := str.format("{0} {1} {2} @ {3} | TP {4} | SL {5}", notifyTag, side, sym, eS, tS, sS)
+    else
+        out := str.format("{0} | {1} {2} khung M1\nThời điểm: {3}\nEntry: {4}\nTP: {5} ({6} giá)\nSL: {7} ({8} giá)",
+             notifyTag, side, sym, tt, eS, tS, str.tostring(tpDist, "#.##"), sS, str.tostring(slDist, "#.##"))
+        if notifyExtra
+            out += str.format("\nXu hướng: {0}\nNguồn tín hiệu: {1}", trend, src == "TL" ? "trendline chính" : src == "TLn" ? "trendline nhanh" : "EMA động")
+    out
+
+// Gửi thông báo đúng 1 lần cho mỗi tín hiệu (chỉ chạy trên nến đã đóng).
+f_notify(int d, string src, float e, float tpv, float slv, string tt, string trend, bool inSession) =>
+    bool sent = false
+    if notifyOn and (not notifyInSes or inSession)
+        alert(f_sigMsg(d, src, e, tpv, slv, tt, trend), alert.freq_once_per_bar_close)
+        sent := true
+    sent
+
+f_statusTxt(TLine t) =>
+    string r = "Chưa có"
+    if not na(t)
+        r := t.status == 1 ? "Hợp lệ" : t.status == 2 ? "Bị phá vỡ" : "Hết hạn"
+    r
+
+f_isValid(TLine t) =>
+    bool r = false
+    if not na(t)
+        r := t.status == 1
+    r
+
+f_valAt(TLine t) =>
+    float r = na
+    if not na(t)
+        r := f_tlVal(t, bar_index)
+    r
+
+f_known(TLine t) =>
+    int r = 0
+    if not na(t)
+        r := t.knownB
+    r
+
+// ============================================================================
+// 5. BIẾN TRẠNG THÁI
+// ============================================================================
+MAXPV = 30
+var array<float> phMP = array.new<float>()
+var array<int>   phMB = array.new<int>()
+var array<float> plMP = array.new<float>()
+var array<int>   plMB = array.new<int>()
+var array<float> phFP = array.new<float>()
+var array<int>   phFB = array.new<int>()
+var array<float> plFP = array.new<float>()
+var array<int>   plFB = array.new<int>()
+
+var bool bullBroken = false
+var bool bearBroken = false
+var int  bosDir   = 0
+var int  trendDir = 0
+var string trendTxt  = "Chưa đủ dữ liệu"
+var string structWhy = "Chưa đủ pivot"
+
+var TLine buM = na
+var TLine beM = na
+var TLine buF = na
+var TLine beF = na
+var array<line> oldTL = array.new<line>()
+
+var Setup sBuM = Setup.new()
+var Setup sBuF = Setup.new()
+var Setup sBuE = Setup.new()
+var Setup sBeM = Setup.new()
+var Setup sBeF = Setup.new()
+var Setup sBeE = Setup.new()
+
+var array<Sig>   active  = array.new<Sig>()
+var array<line>  hLines  = array.new<line>()
+var array<label> hLabels = array.new<label>()
+var array<box>   hBoxes  = array.new<box>()
+var string lastSigTxt = "Không"
+var string lastNotifyTxt = "Chưa có"
+
+var array<int> stT = array.new<int>()   // thời điểm các tín hiệu
+var array<int> rsT = array.new<int>()   // thời điểm các lệnh đã đóng
+var array<int> rsO = array.new<int>()   // thời điểm VÀO của các lệnh đã đóng
+var array<int> rsK = array.new<int>()   // 0 = TP, 1 = SL, 2 = không xác định
+var array<float> rsP = array.new<float>() // lãi/lỗ thực tế của từng lệnh đã đóng (giá)
+var float pnlAll = 0.0                    // lãi/lỗ thực tế toàn chart (giá)
+var int cutoffV = 0                     // mốc đầu phạm vi thống kê hiện hành
+
+var int nSig = 0
+var int nTP  = 0
+var int nSL  = 0
+var int nUnk = 0
+var int firstBar = na
+
+var int  sesStartV = na
+var int  sesEndV   = na
+var int  monStartV = na
+var bool inWinV    = false
+
+var string setupTxt  = "—"
+var string reasonTxt = "—"
+
+bool  buySig  = false
+bool  sellSig = false
+float sigE = na
+float sigT = na
+float sigS = na
+
+// ============================================================================
+// 6. LOGIC CHÍNH – chỉ chạy khi nến M1 đã đóng
+// ============================================================================
+if confirmed and isM1 and not na(atr)
+    if na(firstBar)
+        firstBar := bar_index
+    // ---------- 6.0 Cửa sổ thống kê theo phiên ----------
+    dayStart = timestamp(tzIn, year(time_close, tzIn), month(time_close, tzIn), dayofmonth(time_close, tzIn), 0, 0)
+    int sesDur = (sessEH * 60 + sessEM - sessSH * 60 - sessSM) * 60000
+    if sesDur <= 0
+        sesDur += 86400000
+    int sesStart = dayStart + (sessSH * 60 + sessSM) * 60000
+    if time_close < sesStart
+        sesStart -= 86400000
+    sesStartV := sesStart
+    sesEndV   := sesStart + sesDur
+    // Mốc 00:00 ngày 1 của tháng đang chạy (theo múi giờ đã chọn).
+    monStartV := timestamp(tzIn, year(time_close, tzIn), month(time_close, tzIn), 1, 0, 0)
+    int todMin  = hour(time_close, tzIn) * 60 + minute(time_close, tzIn)
+    int monFrom = monSH * 60 + monSM
+    int monTo   = monEH * 60 + monEM
+    bool inMonWin = monTo > monFrom ? (todMin >= monFrom and todMin <= monTo) : (todMin >= monFrom or todMin <= monTo)
+    inWinV    := statMode == "Phiên trong ngày" ? (time_close >= sesStartV and time_close <= sesEndV) : statMode == "Tháng này (theo khung giờ)" ? inMonWin : true
+    // ---------- 6.1 Pivot đã xác nhận ----------
+    newPHM = not na(phM)
+    newPLM = not na(plM)
+    newPHF = useFast and not na(phF)
+    newPLF = useFast and not na(plF)
+    if newPHM
+        phMP.unshift(phM)
+        phMB.unshift(bar_index - pvRight)
+        if phMP.size() > MAXPV
+            phMP.pop()
+            phMB.pop()
+        bearBroken := false
+    if newPLM
+        plMP.unshift(plM)
+        plMB.unshift(bar_index - pvRight)
+        if plMP.size() > MAXPV
+            plMP.pop()
+            plMB.pop()
+        bullBroken := false
+    if newPHF
+        phFP.unshift(phF)
+        phFB.unshift(bar_index - fastR)
+        if phFP.size() > MAXPV
+            phFP.pop()
+            phFB.pop()
+    if newPLF
+        plFP.unshift(plF)
+        plFB.unshift(bar_index - fastR)
+        if plFP.size() > MAXPV
+            plFP.pop()
+            plFB.pop()
+
+    // ---------- 6.2 Xu hướng ----------
+    int raw = 0
+    if trendMode == "HH/HL chặt"
+        if phMP.size() >= 2 and plMP.size() >= 2
+            step = minStepAtr * atr
+            hh = phMP.get(0) > phMP.get(1) + step
+            hl = plMP.get(0) > plMP.get(1) + step
+            lh = phMP.get(0) < phMP.get(1) - step
+            ll = plMP.get(0) < plMP.get(1) - step
+            sd = hh and hl ? 1 : lh and ll ? -1 : 0
+            if sd == 1 and close < plMP.get(0)
+                bullBroken := true
+            if sd == -1 and close > phMP.get(0)
+                bearBroken := true
+            raw := sd == 1 and not bullBroken ? 1 : sd == -1 and not bearBroken ? -1 : 0
+            structWhy := sd == 0 ? "Đỉnh/đáy không cùng chiều (đi ngang/mâu thuẫn)" : raw == 0 ? "Giá đã phá đáy/đỉnh gần nhất – cấu trúc mất hiệu lực" : ""
+        else
+            structWhy := "Chưa đủ 2 đỉnh và 2 đáy đã xác nhận"
+    else
+        if phMP.size() > 0 and plMP.size() > 0
+            if close > phMP.get(0)
+                bosDir := 1
+            else if close < plMP.get(0)
+                bosDir := -1
+            raw := bosDir
+            structWhy := bosDir == 0 ? "Chưa có phá cấu trúc (BOS)" : ""
+        else
+            structWhy := "Chưa đủ đỉnh/đáy đã xác nhận"
+    if useEmaFilt and isCustom and raw != 0 and (raw == 1 ? close <= ema50 : close >= ema50)
+        structWhy := "Bị bộ lọc EMA50 chặn"
+        raw := 0
+    trendDir := raw
+    trendTxt := trendDir == 1 ? "TĂNG" : trendDir == -1 ? "GIẢM" : "TRUNG TÍNH"
+    trendTxt += trendMode == "BOS" ? " (BOS)" : " (HH/HL)"
+
+    // ---------- 6.3 Tạo / thay thế trendline ----------
+    if newPLM
+        t = f_build(true, plMP, plMB, minGap, false)
+        if not na(t)
+            if f_isValid(buM)
+                f_retire(buM, oldTL)
+            buM := t
+            f_draw(buM, true)
+            sBuM.st := 0
+    if newPHM
+        t = f_build(false, phMP, phMB, minGap, false)
+        if not na(t)
+            if f_isValid(beM)
+                f_retire(beM, oldTL)
+            beM := t
+            f_draw(beM, false)
+            sBeM.st := 0
+    if newPLF
+        t = f_build(true, plFP, plFB, minGapF, true)
+        if not na(t)
+            if f_isValid(buF)
+                f_retire(buF, oldTL)
+            buF := t
+            f_draw(buF, true)
+            sBuF.st := 0
+    if newPHF
+        t = f_build(false, phFP, phFB, minGapF, true)
+        if not na(t)
+            if f_isValid(beF)
+                f_retire(beF, oldTL)
+            beF := t
+            f_draw(beF, false)
+            sBeF.st := 0
+
+    // ---------- 6.4 Phá vỡ / hết hạn ----------
+    f_status(buM, true, oldTL)
+    f_status(beM, false, oldTL)
+    f_status(buF, true, oldTL)
+    f_status(beF, false, oldTL)
+
+    // ---------- 6.5 Theo dõi các tín hiệu đang hoạt động (từ nến KẾ TIẾP) ----------
+    bool justExited = false
+    if active.size() > 0
+        for k = active.size() - 1 to 0
+            sg = active.get(k)
+            if bar_index > sg.bar
+                hitTP = sg.dir == 1 ? high >= sg.tp : low <= sg.tp
+                hitSL = sg.dir == 1 ? low <= sg.sl : high >= sg.sl
+                if hitTP or hitSL
+                    res = hitTP and hitSL ? "Không xác định" : hitTP ? "TP" : "SL"
+                    // Lãi/lỗ thực tế: cụm gồng có TP = điểm vào lệnh gốc nên không
+                    // thể dùng tpDist/slDist cố định được nữa.
+                    float exPx = res == "TP" ? sg.tp : sg.sl
+                    float pnl  = (exPx - sg.entry) * sg.dir / priceUnit
+                    pnlAll += pnl
+                    if res == "TP"
+                        nTP += 1
+                    else if res == "SL"
+                        nSL += 1
+                    else
+                        nUnk += 1
+                    // Chỉ ghi nhận nếu lệnh được VÀO trong khung giờ thống kê.
+                    // Lệnh vào lúc 06:00 rồi đóng lúc 09:00 sẽ KHÔNG được tính.
+                    if sg.inWin
+                        rsT.push(time_close)
+                        rsO.push(sg.tOpen)
+                        rsK.push(res == "TP" ? 0 : res == "SL" ? 1 : 2)
+                        rsP.push(pnl)
+                    justExited := true
+                    if not na(sg.lnE)
+                        line.set_x2(sg.lnE, bar_index)
+                        line.set_x2(sg.lnT, bar_index)
+                        line.set_x2(sg.lnS, bar_index)
+                        label.set_x(sg.lbE, bar_index)
+                        label.set_x(sg.lbT, bar_index)
+                        label.set_x(sg.lbS, bar_index)
+                    if not na(sg.bxT)
+                        box.set_right(sg.bxT, bar_index)
+                        box.set_right(sg.bxS, bar_index)
+                    if showHistory
+                        ex = label.new(bar_index, sg.dir == 1 ? high : low, res == "Không xác định" ? "?" : pnl > 0 ? "✓ ĂN " + str.tostring(pnl, "#.##") + " giá" : pnl < 0 ? "✗ LỖ " + str.tostring(-pnl, "#.##") + " giá" : "= HÒA VỐN",
+                             yloc = sg.dir == 1 ? yloc.abovebar : yloc.belowbar,
+                             style = sg.dir == 1 ? label.style_label_down : label.style_label_up,
+                             color = res == "TP" ? cTP : res == "SL" ? cSL : color.orange, textcolor = color.white, size = size.tiny,
+                             tooltip = res == "Không xác định" ? "Nến chạm cả TP và SL – không rõ thứ tự, không tính là thắng." : "Kết thúc tín hiệu " + sg.tTxt)
+                        hLabels.push(ex)
+                    if alertExits
+                        alert(str.format("{0} | Kết thúc {1} {2}: {3}", syminfo.ticker, sg.dir == 1 ? "BUY" : "SELL", sg.tTxt, res), alert.freq_once_per_bar_close)
+                    active.remove(k)
+                else
+                    // ---------- Gồng: giá đi ngược đúng dcaDist so với ĐIỂM VÀO lệnh gốc ----------
+                    // Mỗi chu kỳ tối đa 2 lệnh. Lệnh gồng không được gồng tiếp.
+                    if useDca and not sg.isAdd and not sg.added
+                        bool dcaHit = sg.dir == 1 ? low <= sg.addAt : high >= sg.addAt
+                        if dcaHit
+                            sg.added := true
+                            sg.tp    := sg.entry
+                            if not na(sg.lnT)
+                                line.set_y1(sg.lnT, sg.tp)
+                                line.set_y2(sg.lnT, sg.tp)
+                                label.set_y(sg.lbT, sg.tp)
+                                label.set_text(sg.lbT, (uiMobile ? "② LỜI " : "② CHỐT LỜI  ") + str.tostring(sg.tp, format.mintick) + (uiMobile ? " hòa" : "  (về hòa vốn)"))
+                            if not na(sg.bxT)
+                                box.set_top(sg.bxT, math.max(sg.entry, sg.addAt))
+                                box.set_bottom(sg.bxT, math.min(sg.entry, sg.addAt))
+                            float e2 = sg.addAt
+                            Sig sg2 = Sig.new(dir = sg.dir, bar = bar_index, entry = e2, tp = sg.entry, sl = sg.sl, src = "Gồng",
+                                 tTxt = str.format_time(time_close, "yyyy-MM-dd HH:mm", tzIn), tOpen = sg.tOpen, inWin = sg.inWin,
+                                 isAdd = true, added = true, addAt = na)
+                            nSig += 1
+                            if sg.inWin
+                                stT.push(time_close)
+                            if showSigLbl
+                                lb2 = label.new(bar_index, sg.dir == 1 ? low : high, sg.dir == 1 ? "＋ MUA GỒNG" : "＋ BÁN GỒNG",
+                                     yloc = sg.dir == 1 ? yloc.belowbar : yloc.abovebar,
+                                     style = sg.dir == 1 ? label.style_label_up : label.style_label_down,
+                                     color = sg.dir == 1 ? cBull : cBear, textcolor = color.white, size = sizeMid,
+                                     tooltip = "Lệnh gồng thứ 2 – cùng chiều, cùng khối lượng với lệnh gốc.\nVào lệnh: " + str.tostring(e2, format.mintick) + "\nChốt lời cả cụm: " + str.tostring(sg.entry, format.mintick) + "\nCắt lỗ cả cụm: " + str.tostring(sg.sl, format.mintick))
+                                hLabels.push(lb2)
+                            if showLevels
+                                lw2 = uiSimple ? 2 : 1
+                                lbSty2 = uiMobile ? label.style_label_right : label.style_label_left
+                                sg2.lnE := line.new(bar_index, e2, bar_index + 5, e2, color = cEntry, width = lw2)
+                                sg2.lnT := line.new(bar_index, sg2.tp, bar_index + 5, sg2.tp, color = cTP, width = lw2, style = line.style_dashed)
+                                sg2.lnS := line.new(bar_index, sg2.sl, bar_index + 5, sg2.sl, color = cSL, width = lw2, style = line.style_dashed)
+                                sg2.lbE := label.new(bar_index + 5, e2, (uiMobile ? "① GỒNG " : "① VÀO GỒNG  ") + str.tostring(e2, format.mintick), style = lbSty2, color = color.new(cEntry, 75), textcolor = cEntry, size = sizeMid)
+                                sg2.lbT := label.new(bar_index + 5, sg2.tp, (uiMobile ? "② LỜI " : "② CHỐT LỜI  ") + str.tostring(sg2.tp, format.mintick), style = lbSty2, color = color.new(cTP, 75), textcolor = cTP, size = sizeMid)
+                                sg2.lbS := label.new(bar_index + 5, sg2.sl, (uiMobile ? "③ LỖ " : "③ CẮT LỖ  ") + str.tostring(sg2.sl, format.mintick), style = lbSty2, color = color.new(cSL, 75), textcolor = cSL, size = sizeMid)
+                                hLines.push(sg2.lnE)
+                                hLines.push(sg2.lnT)
+                                hLines.push(sg2.lnS)
+                                hLabels.push(sg2.lbE)
+                                hLabels.push(sg2.lbT)
+                                hLabels.push(sg2.lbS)
+                            active.push(sg2)
+                    if not na(sg.lnE)
+                        line.set_x2(sg.lnE, bar_index + 5)
+                        line.set_x2(sg.lnT, bar_index + 5)
+                        line.set_x2(sg.lnS, bar_index + 5)
+                        label.set_x(sg.lbE, bar_index + 5)
+                        label.set_x(sg.lbT, bar_index + 5)
+                        label.set_x(sg.lbS, bar_index + 5)
+                    if not na(sg.bxT)
+                        box.set_right(sg.bxT, bar_index + 5)
+                        box.set_right(sg.bxS, bar_index + 5)
+
+    // ---------- 6.6 Thiết lập ----------
+    canSig = active.size() < maxActive and not (maxActive == 1 and justExited)
+    bool   bFire = false
+    string bSrc  = ""
+    if f_setup(sBuM, true, f_valAt(buM), trendDir == 1 and f_isValid(buM), f_known(buM), canSig)
+        bFire := true
+        bSrc := "TL"
+    if f_setup(sBuF, true, f_valAt(buF), useFast and trendDir == 1 and f_isValid(buF), f_known(buF), canSig and not bFire)
+        bFire := true
+        bSrc := bSrc == "" ? "TLn" : bSrc
+    if f_setup(sBuE, true, emaLn, useEmaLn and trendDir == 1, 0, canSig and not bFire)
+        bFire := true
+        bSrc := bSrc == "" ? "EMA" : bSrc
+    bool   sFire = false
+    string sSrc  = ""
+    if f_setup(sBeM, false, f_valAt(beM), trendDir == -1 and f_isValid(beM), f_known(beM), canSig)
+        sFire := true
+        sSrc := "TL"
+    if f_setup(sBeF, false, f_valAt(beF), useFast and trendDir == -1 and f_isValid(beF), f_known(beF), canSig and not sFire)
+        sFire := true
+        sSrc := sSrc == "" ? "TLn" : sSrc
+    if f_setup(sBeE, false, emaLn, useEmaLn and trendDir == -1, 0, canSig and not sFire)
+        sFire := true
+        sSrc := sSrc == "" ? "EMA" : sSrc
+    // Mỗi nhịp hồi chỉ 1 tín hiệu: phát xong thì mọi thiết lập cùng chiều phải chờ giá rời vùng lại.
+    if bFire
+        sBuM.st := 0
+        sBuF.st := 0
+        sBuE.st := 0
+    if sFire
+        sBeM.st := 0
+        sBeF.st := 0
+        sBeE.st := 0
+
+    // ---------- 6.7 Phát tín hiệu ----------
+    if bFire or sFire
+        d   = bFire ? 1 : -1
+        src = bFire ? bSrc : sSrc
+        e   = math.round_to_mintick(close)
+        tpv = math.round_to_mintick(e + d * tpDist * priceUnit)
+        slv = math.round_to_mintick(e - d * slDist * priceUnit)
+        tt  = str.format_time(time_close, "yyyy-MM-dd HH:mm", tzIn)
+        buySig  := bFire
+        sellSig := sFire
+        sigE := e
+        sigT := tpv
+        sigS := slv
+        nSig += 1
+        if inWinV
+            stT.push(time_close)
+        sg = Sig.new(dir = d, bar = bar_index, entry = e, tp = tpv, sl = slv, src = src, tTxt = tt, tOpen = time_close, inWin = inWinV,
+             isAdd = false, added = false, addAt = math.round_to_mintick(e - d * dcaDist * priceUnit))
+        if showSigLbl
+            lbTxt = (d == 1 ? "▲ MUA" : "▼ BÁN") + (uiSimple ? "" : "·" + src)
+            lb = label.new(bar_index, d == 1 ? low : high, lbTxt,
+                 yloc = d == 1 ? yloc.belowbar : yloc.abovebar, style = d == 1 ? label.style_label_up : label.style_label_down,
+                 color = d == 1 ? cBull : cBear, textcolor = color.white, size = sizeBig,
+                 tooltip = (d == 1 ? "MUA (BUY) " : "BÁN (SELL) ") + syminfo.ticker + " | " + tt + "\nVào lệnh: " + str.tostring(e, format.mintick) + "\nChốt lời: " + str.tostring(tpv, format.mintick) + " (+" + str.tostring(tpDist, "#.##") + " giá)\nCắt lỗ: " + str.tostring(slv, format.mintick) + " (−" + str.tostring(slDist, "#.##") + " giá)")
+            hLabels.push(lb)
+        if showLevels
+            lw = uiSimple ? 2 : 1
+            sg.lnE := line.new(bar_index, e, bar_index + 5, e, color = cEntry, width = lw)
+            sg.lnT := line.new(bar_index, tpv, bar_index + 5, tpv, color = cTP, width = lw, style = line.style_dashed)
+            sg.lnS := line.new(bar_index, slv, bar_index + 5, slv, color = cSL, width = lw, style = line.style_dashed)
+            lbSty = uiMobile ? label.style_label_right : label.style_label_left
+            txtE  = (uiMobile ? "① VÀO " : "① VÀO LỆNH  ") + str.tostring(e, format.mintick)
+            txtT  = (uiMobile ? "② LỜI " : "② CHỐT LỜI  ") + str.tostring(tpv, format.mintick) + (uiMobile ? " +" : "  (+") + str.tostring(tpDist, "#.##") + (uiMobile ? "" : ")")
+            txtS  = (uiMobile ? "③ LỖ " : "③ CẮT LỖ  ") + str.tostring(slv, format.mintick) + (uiMobile ? " −" : "  (−") + str.tostring(slDist, "#.##") + (uiMobile ? "" : ")")
+            sg.lbE := label.new(bar_index + 5, e, txtE, style = lbSty, color = color.new(cEntry, 75), textcolor = cEntry, size = sizeMid)
+            sg.lbT := label.new(bar_index + 5, tpv, txtT, style = lbSty, color = color.new(cTP, 75), textcolor = cTP, size = sizeMid)
+            sg.lbS := label.new(bar_index + 5, slv, txtS, style = lbSty, color = color.new(cSL, 75), textcolor = cSL, size = sizeMid)
+            hLines.push(sg.lnE)
+            hLines.push(sg.lnT)
+            hLines.push(sg.lnS)
+            hLabels.push(sg.lbE)
+            hLabels.push(sg.lbT)
+            hLabels.push(sg.lbS)
+            if uiZoneBox
+                sg.bxT := box.new(bar_index, math.max(e, tpv), bar_index + 5, math.min(e, tpv), border_color = color.new(cTP, 70), border_width = 1, bgcolor = cTPbg)
+                sg.bxS := box.new(bar_index, math.max(e, slv), bar_index + 5, math.min(e, slv), border_color = color.new(cSL, 70), border_width = 1, bgcolor = cSLbg)
+                hBoxes.push(sg.bxT)
+                hBoxes.push(sg.bxS)
+                while hBoxes.size() > maxHist * 2
+                    box.delete(hBoxes.shift())
+        active.push(sg)
+        lastSigTxt := (d == 1 ? "BUY·" : "SELL·") + src + " – " + tt
+        while hLines.size() > maxHist * 3
+            line.delete(hLines.shift())
+        while hLabels.size() > maxHist * 5
+            label.delete(hLabels.shift())
+        // Thông báo điểm vào lệnh (nhóm 9). Phát đúng 1 lần cho mỗi tín hiệu.
+        notified = f_notify(d, src, e, tpv, slv, tt, trendTxt, inWinV)
+        lastNotifyTxt := notifyOn ? (notified ? "Đã gửi " + str.format_time(time_close, "HH:mm", tzIn) : "Bỏ qua (ngoài khung giờ phiên)") : "Tắt"
+
+    // ---------- 6.8 Trạng thái & lý do ----------
+    if active.size() >= maxActive
+        setupTxt  := "Đang theo dõi " + str.tostring(active.size()) + " tín hiệu"
+        reasonTxt := "Đã đạt tối đa " + str.tostring(maxActive) + " tín hiệu song song"
+    else if trendDir == 0
+        setupTxt  := "Không đủ điều kiện"
+        reasonTxt := structWhy != "" ? structWhy : "Xu hướng trung tính"
+    else
+        a = trendDir == 1 ? sBuM : sBeM
+        b = trendDir == 1 ? sBuF : sBeF
+        c = trendDir == 1 ? sBuE : sBeE
+        best = math.max(a.st, b.st, c.st)
+        pick = a.st == best ? a : b.st == best ? b : c
+        tlOk = trendDir == 1 ? (f_isValid(buM) or (useFast and f_isValid(buF)) or useEmaLn) : (f_isValid(beM) or (useFast and f_isValid(beF)) or useEmaLn)
+        if not tlOk
+            setupTxt  := "Không đủ điều kiện"
+            reasonTxt := "Chưa có trendline " + (trendDir == 1 ? "tăng" : "giảm") + " hợp lệ"
+        else
+            setupTxt  := best == 2 ? "Chờ xác nhận" : "Chờ hồi"
+            reasonTxt := best == 2 ? pick.fail : best == 1 ? "Chờ giá hồi về vùng " + (trendDir == 1 ? "hỗ trợ" : "kháng cự") : (pick.fail != "" ? pick.fail : "Chờ giá rời xa vùng rồi hồi lại")
+
+    // ---------- 6.9 Giới hạn thống kê theo phạm vi ----------
+    int cutoff = 0
+    if statMode == "Phiên trong ngày"
+        cutoff := sesStartV
+    else if statMode == "Tháng này (theo khung giờ)"
+        cutoff := monStartV
+    else if statMode == "Cả ngày (00:00)"
+        cutoff := dayStart
+    else if statMode == "24 giờ gần nhất"
+        cutoff := time_close - 86400000
+    while stT.size() > 0 and stT.get(0) < cutoff
+        stT.shift()
+    cutoffV := cutoff
+    while rsT.size() > 0 and rsT.get(0) < cutoff
+        rsT.shift()
+        rsO.shift()
+        rsK.shift()
+        rsP.shift()
+    while stT.size() > 2000
+        stT.shift()
+    while rsT.size() > 2000
+        rsT.shift()
+        rsO.shift()
+        rsK.shift()
+        rsP.shift()
+
+// ============================================================================
+// 7. VÙNG TIẾP CẬN TRENDLINE CHÍNH (ngắt khi đổi đường)
+// ============================================================================
+float buV = na
+float beV = na
+if showZone and isM1
+    if not na(buM)
+        if buM.status == 1 and bar_index > buM.knownB
+            buV := f_tlVal(buM, bar_index)
+    if not na(beM)
+        if beM.status == 1 and bar_index > beM.knownB
+            beV := f_tlVal(beM, bar_index)
+pBu1 = plot(buV, "Vùng TL tăng – đường", color = color.new(cBull, 60), style = plot.style_linebr, display = display.pane)
+pBu2 = plot(na(buV) ? na : buV + zoneTol, "Vùng TL tăng – biên", color = color.new(cBull, 85), style = plot.style_linebr, display = display.pane)
+fill(pBu1, pBu2, color = color.new(cBull, 88))
+pBe1 = plot(beV, "Vùng TL giảm – đường", color = color.new(cBear, 60), style = plot.style_linebr, display = display.pane)
+pBe2 = plot(na(beV) ? na : beV - zoneTol, "Vùng TL giảm – biên", color = color.new(cBear, 85), style = plot.style_linebr, display = display.pane)
+fill(pBe1, pBe2, color = color.new(cBear, 88))
+plot(useEmaLn and isM1 ? emaLn : na, "EMA động", color = color.new(color.orange, 40), linewidth = 1, display = display.pane)
+
+// ============================================================================
+// 8. DỮ LIỆU CHO alertcondition
+// ============================================================================
+plot(sigE, "EP Entry", display = display.data_window)
+plot(sigT, "EP TP", display = display.data_window)
+plot(sigS, "EP SL", display = display.data_window)
+alertcondition(buySig, "EP M1 v2 – BUY", "{{ticker}} | BUY | {{time}} (UTC) | Entry {{plot(\"EP Entry\")}} | TP {{plot(\"EP TP\")}} | SL {{plot(\"EP SL\")}} | M1")
+alertcondition(sellSig, "EP M1 v2 – SELL", "{{ticker}} | SELL | {{time}} (UTC) | Entry {{plot(\"EP Entry\")}} | TP {{plot(\"EP TP\")}} | SL {{plot(\"EP SL\")}} | M1")
+alertcondition(buySig or sellSig, "EP M1 v2 – Có điểm vào lệnh (BUY hoặc SELL)", "{{ticker}} | CÓ ĐIỂM VÀO LỆNH | {{time}} (UTC) | Entry {{plot(\"EP Entry\")}} | TP {{plot(\"EP TP\")}} | SL {{plot(\"EP SL\")}} | M1")
+
+// ============================================================================
+// 9. BẢNG TRẠNG THÁI
+// ============================================================================
+tPos = tablePosIn == "Trên phải" ? position.top_right : tablePosIn == "Dưới phải" ? position.bottom_right : tablePosIn == "Trên trái" ? position.top_left : position.bottom_left
+var table tb = table.new(tPos, 2, 18, bgcolor = color.new(#131722, 10), border_color = color.new(color.gray, 70), border_width = 1)
+
+f_row(int r, string k, string v, color vc) =>
+    table.cell(tb, 0, r, k, text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(tb, 1, r, v, text_color = vc, text_size = size.small, text_halign = text.align_left)
+
+f_rowBig(int r, string k, string v, color vc) =>
+    table.cell(tb, 0, r, k, text_color = color.silver, text_size = sizeMid, text_halign = text.align_left)
+    table.cell(tb, 1, r, v, text_color = vc, text_size = sizeBig, text_halign = text.align_left)
+
+// Bảng 1 cột cho điện thoại: mỗi dòng là một câu ngắn, không có cột nhãn riêng nên không bị tràn.
+f_rowM(int r, string txt, color c, string sz) =>
+    table.cell(tb, 0, r, txt, text_color = c, text_size = sz, text_halign = text.align_left)
+
+// Trạng thái vùng vào lệnh của một lệnh bất kỳ đang chạy (dùng khi có nhiều lệnh song song).
+f_run(Sig s) =>
+    (close - s.entry) * s.dir / priceUnit
+
+f_zoneShort(Sig s) =>
+    float r = f_run(s)
+    string t = r < 0 ? "vào được – giá tốt hơn " + str.tostring(-r, "#.##") : r <= uiLateTol ? "vào được (+" + str.tostring(r, "#.##") + ")" : "đã chạy xa +" + str.tostring(r, "#.##")
+    t
+
+f_zoneCol(Sig s) =>
+    float r = f_run(s)
+    color c = r <= uiLateTol ? (s.dir == 1 ? cBull : cBear) : color.orange
+    c
+
+f_hm(int h, int m) =>
+    (h < 10 ? "0" : "") + str.tostring(h) + ":" + (m < 10 ? "0" : "") + str.tostring(m)
+
+f_htfTxt(int d) =>
+    d == 1 ? "Tăng" : d == -1 ? "Giảm" : "—"
+
+if barstate.islast and showTable
+    table.clear(tb, 0, 0, 1, 17)
+    if uiSimple and uiMobile
+        f_rowM(0, syminfo.ticker + " · M1" + (active.size() > 0 ? "  ·  " + str.tostring(active.size()) + "/" + str.tostring(maxActive) + " lệnh đang chạy" : "  ·  tối đa " + str.tostring(maxActive) + " lệnh"), color.silver, sizeMid)
+    else
+        f_row(0, uiSimple ? "TÍN HIỆU VÀNG M1" : "EP M1 TL v2", syminfo.ticker + (uiSimple ? "" : " · " + presetIn), color.white)
+    if not isM1
+        f_row(1, "Khung", "⚠ Chỉ hoạt động trên khung 1 phút – hãy chuyển sang M1", color.orange)
+    else
+        closedN = nTP + nSL + nUnk
+        winPct  = closedN > 0 ? 100.0 * nTP / closedN : na   // toàn chart: theo chạm TP
+        netPx   = pnlAll
+        days    = na(firstBar) ? 0.0 : (bar_index - firstBar) / 1380.0
+        int wTP = 0
+        int wSL = 0
+        int wUn = 0
+        int wWinN  = 0
+        int wLossN = 0
+        int wBeN   = 0
+        float wNet    = 0.0
+        float sumWin  = 0.0
+        float sumLoss = 0.0
+        if rsK.size() > 0
+            for k = 0 to rsK.size() - 1
+                // Bỏ qua lệnh được vào trước mốc đầu phạm vi thống kê.
+                if rsO.get(k) >= cutoffV
+                    kk = rsK.get(k)
+                    if kk == 0
+                        wTP += 1
+                    else if kk == 1
+                        wSL += 1
+                    else
+                        wUn += 1
+                    // Thắng/thua tính theo lãi/lỗ THỰC TẾ, vì lệnh gốc trong cụm
+                    // gồng chốt ở hòa vốn chứ không phải +TP.
+                    float pk = rsP.get(k)
+                    wNet += pk
+                    if pk > 0
+                        wWinN  += 1
+                        sumWin += pk
+                    else if pk < 0
+                        wLossN  += 1
+                        sumLoss -= pk
+                    else
+                        wBeN += 1
+        wClosed = wWinN + wLossN + wBeN
+        wWin    = wClosed > 0 ? 100.0 * wWinN / wClosed : na
+        avgWin  = wWinN  > 0 ? sumWin  / wWinN  : 0.0
+        avgLoss = wLossN > 0 ? sumLoss / wLossN : 0.0
+        beWin   = (avgWin + avgLoss) > 0 ? 100.0 * avgLoss / (avgWin + avgLoss) : na
+        if uiSimple
+            // ---- Bảng gọn: chỉ trả lời 3 câu hỏi vào đâu / chốt đâu / cắt đâu ----
+            if uiPanel
+                Sig cur = na
+                if active.size() > 0
+                    cur := active.get(active.size() - 1)
+                bool hasSig = not na(cur)
+                int  cd = 0
+                float cE = na
+                float cT = na
+                float cS = na
+                if hasSig
+                    cd := cur.dir
+                    cE := cur.entry
+                    cT := cur.tp
+                    cS := cur.sl
+                string sideTxt = hasSig ? (cd == 1 ? "MUA  (BUY)" : "BÁN  (SELL)") : "Chưa có – đang chờ"
+                color  sideCol = hasSig ? (cd == 1 ? cBull : cBear) : color.gray
+                int nAct = active.size()
+                string todo = nAct >= maxActive ? "Đã đủ " + str.tostring(maxActive) + " lệnh song song – chỉ giữ, không vào thêm cho tới khi một lệnh đóng" : hasSig ? "Giữ lệnh – chờ chạm CHỐT LỜI hoặc CẮT LỖ" : trendDir == 0 ? "Chưa vào lệnh – thị trường chưa rõ hướng" : "Chưa vào lệnh – chờ nến xác nhận"
+                string todoM = nAct >= maxActive ? "Đủ " + str.tostring(maxActive) + " lệnh – không vào thêm" : hasSig ? "Giữ lệnh, chờ chạm lời / lỗ" : trendDir == 0 ? "Chờ – chưa rõ hướng" : "Chờ nến xác nhận"
+                // Lệnh đang chạy: giá hiện tại còn nằm trong vùng vào lệnh hay đã chạy xa?
+                // runP > 0: giá đã chạy THUẬN chiều (vào muộn bị hớ). runP < 0: giá đi ngược, vào lúc này được giá TỐT HƠN.
+                float runP = hasSig ? (close - cE) * cd / priceUnit : na
+                float toSL = hasSig ? math.abs(cS - close) / priceUnit : na
+                bool  better  = hasSig and runP < 0
+                bool  stillIn = hasSig and runP <= uiLateTol
+                string runTxt = hasSig ? str.tostring(math.abs(runP), "#.##") : ""
+                string slTxt  = hasSig ? str.tostring(toSL, "#.##") : ""
+                string zoneM = not hasSig ? "" : better ? "CÒN VÀO ĐƯỢC · giá tốt hơn " + runTxt : stillIn ? "CÒN VÀO ĐƯỢC · đã chạy +" + runTxt : "ĐÃ CHẠY XA +" + runTxt + " · đừng đuổi"
+                string zoneL = not hasSig ? "—" : better ? "Còn vào được – vào lúc này được giá tốt hơn tín hiệu " + runTxt + " giá, còn " + slTxt + " giá tới cắt lỗ" : stillIn ? "Còn vào được – giá mới chạy thuận " + runTxt + " giá" : "Giá đã chạy thuận " + runTxt + " giá – đừng đuổi giá, chờ tín hiệu sau"
+                color  zoneC = not hasSig ? color.gray : stillIn ? (cd == 1 ? cBull : cBear) : color.orange
+                // Nhắc rõ các con số bên dưới được tính trong phạm vi nào (nhóm 6).
+                bool   inSes  = inWinV
+                string scopeM = statMode == "Phiên trong ngày" ? "Phiên " + f_hm(sessSH, sessSM) + "–" + f_hm(sessEH, sessEM) + (inWinV ? " · đang trong phiên" : " · NGOÀI phiên") : statMode == "Tháng này (theo khung giờ)" ? "Tháng " + str.format_time(time_close, "MM/yyyy", tzIn) + " · " + f_hm(monSH, monSM) + "–" + f_hm(monEH, monEM) + (inWinV ? "" : " · NGOÀI giờ") : statMode == "Cả ngày (00:00)" ? "Cả ngày " + str.format_time(time_close, "dd/MM", tzIn) : statMode == "24 giờ gần nhất" ? "24 giờ gần nhất" : "Toàn bộ chart"
+                string scopeL = statMode == "Phiên trong ngày" ? "Phiên " + f_hm(sessSH, sessSM) + "–" + f_hm(sessEH, sessEM) + (na(sesStartV) ? "" : " – " + str.format_time(sesStartV, "dd/MM", tzIn)) + (inWinV ? " · đang trong phiên" : " · ngoài phiên") : statMode == "Tháng này (theo khung giờ)" ? "Tháng " + str.format_time(time_close, "MM/yyyy", tzIn) + " – từ ngày 01, chỉ tính lệnh vào trong " + f_hm(monSH, monSM) + "–" + f_hm(monEH, monEM) + (inWinV ? " · đang trong khung giờ" : " · ngoài khung giờ") : statMode == "Cả ngày (00:00)" ? statMode + " – " + str.format_time(time_close, "dd/MM", tzIn) : statMode
+                if uiMobile
+                    // 1 cột, câu ngắn – vừa bề ngang điện thoại. Nhiều lệnh thì mỗi lệnh 2 dòng.
+                    int rw = 1
+                    if nAct >= 2
+                        for k = 0 to nAct - 1
+                            sg2 = active.get(k)
+                            f_rowM(rw, "LỆNH " + str.tostring(k + 1) + "  " + (sg2.dir == 1 ? "▲ MUA" : "▼ BÁN") + "  vào " + str.tostring(sg2.entry, format.mintick), sg2.dir == 1 ? cBull : cBear, sizeBig)
+                            rw += 1
+                            f_rowM(rw, "     lời " + str.tostring(sg2.tp, format.mintick) + " · lỗ " + str.tostring(sg2.sl, format.mintick) + " · " + f_zoneShort(sg2), f_zoneCol(sg2), sizeMid)
+                            rw += 1
+                    else
+                        f_rowM(rw, hasSig ? (cd == 1 ? "▲ MUA (BUY)" : "▼ BÁN (SELL)") : "CHƯA CÓ TÍN HIỆU", sideCol, sizeBig)
+                        rw += 1
+                        f_rowM(rw, "① VÀO  " + (hasSig ? str.tostring(cE, format.mintick) : "—"), hasSig ? cEntry : color.gray, sizeBig)
+                        rw += 1
+                        f_rowM(rw, "② LỜI  " + (hasSig ? str.tostring(cT, format.mintick) + "  +" + str.tostring(tpDist, "#.##") : "—"), hasSig ? cTP : color.gray, sizeBig)
+                        rw += 1
+                        f_rowM(rw, "③ LỖ   " + (hasSig ? str.tostring(cS, format.mintick) + "  −" + str.tostring(slDist, "#.##") : "—"), hasSig ? cSL : color.gray, sizeBig)
+                        rw += 1
+                        if hasSig
+                            f_rowM(rw, zoneM, zoneC, sizeMid)
+                            rw += 1
+                    f_rowM(rw, todoM, color.yellow, sizeMid)
+                    rw += 1
+                    f_rowM(rw, "Tính trong: " + scopeM, inSes ? color.silver : color.orange, sizeMid)
+                    rw += 1
+                    f_rowM(rw, "Kết quả " + str.tostring(wWinN) + " ăn / " + str.tostring(wLossN) + " lỗ" + (wBeN > 0 ? " / " + str.tostring(wBeN) + " hòa" : "") + " · " + (wNet >= 0 ? "+" : "") + str.tostring(wNet, "#.##") + " giá", wNet >= 0 ? cBull : cBear, sizeMid)
+                    rw += 1
+                    if uiNote
+                        f_rowM(rw, "Chỉ vào khi có mũi tên MUA/BÁN", color.silver, sizeMid)
+                else
+                    if nAct >= 2
+                        f_rowBig(1, "ĐANG CHẠY", str.tostring(nAct) + " / " + str.tostring(maxActive) + " lệnh", color.white)
+                        for k = 0 to math.min(nAct, 4) - 1
+                            sg2 = active.get(k)
+                            f_row(2 + k, "Lệnh " + str.tostring(k + 1) + " · " + (sg2.dir == 1 ? "MUA" : "BÁN"), "vào " + str.tostring(sg2.entry, format.mintick) + " · lời " + str.tostring(sg2.tp, format.mintick) + " · lỗ " + str.tostring(sg2.sl, format.mintick) + " · " + f_zoneShort(sg2), f_zoneCol(sg2))
+                    else
+                        f_rowBig(1, "TÍN HIỆU", sideTxt, sideCol)
+                        f_rowBig(2, "① VÀO LỆNH", hasSig ? str.tostring(cE, format.mintick) : "—", hasSig ? cEntry : color.gray)
+                        f_rowBig(3, "② CHỐT LỜI", hasSig ? str.tostring(cT, format.mintick) + "   (+" + str.tostring(tpDist, "#.##") + " giá)" : "—", hasSig ? cTP : color.gray)
+                        f_rowBig(4, "③ CẮT LỖ", hasSig ? str.tostring(cS, format.mintick) + "   (−" + str.tostring(slDist, "#.##") + " giá)" : "—", hasSig ? cSL : color.gray)
+                        f_row(5, "Vùng vào lệnh", zoneL, zoneC)
+                    f_row(6, "Việc cần làm", todo, color.yellow)
+                    f_row(7, "Phạm vi thống kê", scopeL, inSes ? color.white : color.orange)
+                    f_row(8, "Kết quả trong phạm vi", str.tostring(wWinN) + " lệnh ăn / " + str.tostring(wLossN) + " lệnh lỗ" + (wBeN > 0 ? " / " + str.tostring(wBeN) + " hòa vốn" : "") + " · " + (wNet >= 0 ? "+" : "") + str.tostring(wNet, "#.##") + " giá", wNet >= 0 ? cBull : cBear)
+                    if uiNote
+                        f_row(9, "Ghi nhớ", "Chỉ vào lệnh khi có mũi tên MUA/BÁN. Luôn đặt sẵn chốt lời và cắt lỗ.", color.silver)
+        else
+            f_row(1, "Khung", "1 phút ✔", color.white)
+            f_row(2, "Xu hướng M1", trendTxt, trendDir == 1 ? cBull : trendDir == -1 ? cBear : color.gray)
+            f_row(3, "TL tăng chính / nhanh", f_statusTxt(buM) + (useFast ? " / " + f_statusTxt(buF) : ""), f_isValid(buM) ? cBull : color.gray)
+            f_row(4, "TL giảm chính / nhanh", f_statusTxt(beM) + (useFast ? " / " + f_statusTxt(beF) : ""), f_isValid(beM) ? cBear : color.gray)
+            f_row(5, "Thiết lập", setupTxt, color.white)
+            f_row(6, "Tín hiệu gần nhất", lastSigTxt, color.white)
+            f_row(16, "Thông báo", (notifyOn ? notifyFmt + (notifyInSes ? " · chỉ trong phiên" : " · mọi lúc") : "Tắt") + " · " + lastNotifyTxt, notifyOn ? color.white : color.gray)
+            string act = ""
+            if active.size() > 0
+                for k = 0 to active.size() - 1
+                    sg = active.get(k)
+                    act += (k > 0 ? "\n" : "") + (sg.dir == 1 ? "BUY " : "SELL ") + str.tostring(sg.entry, format.mintick) + " / " + str.tostring(sg.tp, format.mintick) + " / " + str.tostring(sg.sl, format.mintick)
+            f_row(7, "Đang theo dõi (E/TP/SL)", act == "" ? "—" : act, color.white)
+            f_row(8, "Lý do", reasonTxt == "" ? "—" : reasonTxt, color.yellow)
+            scope = statMode == "Phiên trong ngày" ? "Phiên " + f_hm(sessSH, sessSM) + "–" + f_hm(sessEH, sessEM) + (na(sesStartV) ? "" : " – " + str.format_time(sesStartV, "dd/MM", tzIn)) + (inWinV ? " · đang trong phiên" : " · ngoài phiên") : statMode == "Tháng này (theo khung giờ)" ? "Tháng " + str.format_time(time_close, "MM/yyyy", tzIn) + " – từ ngày 01, chỉ tính lệnh vào trong " + f_hm(monSH, monSM) + "–" + f_hm(monEH, monEM) + (inWinV ? " · đang trong khung giờ" : " · ngoài khung giờ") : statMode == "Cả ngày (00:00)" ? statMode + " – " + str.format_time(time_close, "dd/MM", tzIn) : statMode
+            f_row(9, "Phạm vi thống kê", scope, inWinV ? color.white : color.orange)
+            f_row(10, "Số tín hiệu", str.tostring(stT.size()), color.silver)
+            f_row(11, "TP / SL / ?", str.tostring(wTP) + " / " + str.tostring(wSL) + " / " + str.tostring(wUn), color.silver)
+            f_row(12, "Tỷ lệ thắng / hòa vốn", (na(wWin) ? "—" : str.tostring(wWin, "#.#") + "%") + " / cần > " + (na(beWin) ? "—" : str.tostring(beWin, "#.#") + "%"), na(wWin) or na(beWin) ? color.silver : wWin > beWin ? cBull : cBear)
+            f_row(13, "Lãi/lỗ (giá, chưa phí)", (wNet >= 0 ? "+" : "") + str.tostring(wNet, "#.##"), wNet >= 0 ? cBull : cBear)
+            f_row(14, "Toàn chart", str.tostring(nSig) + " lệnh" + (days > 0.5 ? " (~" + str.tostring(nSig / days, "#.#") + "/ngày)" : "") + " · TP/SL/? " + str.tostring(nTP) + "/" + str.tostring(nSL) + "/" + str.tostring(nUnk) + " · " + (na(winPct) ? "—" : str.tostring(winPct, "#.#") + "%") + " · " + (netPx >= 0 ? "+" : "") + str.tostring(netPx, "#.##") + " giá", netPx >= 0 ? cBull : cBear)
+            if showHtf
+                f_row(15, "Tham khảo M3 / M15", f_htfTxt(htf3) + " / " + f_htfTxt(htf15) + " (không lọc)", color.silver)
+
+// ============================================================================
+// 10. WATERMARK
+// ============================================================================
+wmSize = wmSizeIn == "Rất lớn" ? size.huge : wmSizeIn == "Vừa" ? size.normal : size.large
+var table wmTb = table.new(position.middle_center, 1, 1)
+if barstate.islast
+    table.clear(wmTb, 0, 0, 0, 0)
+    if wmOn
+        table.cell(wmTb, 0, 0, wmText, text_color = color.new(wmColor, wmTrans), text_size = wmSize)
